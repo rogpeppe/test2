@@ -1,7 +1,8 @@
 package main
-import  "github.com/rogpeppe/test/foo"
 
-var _ = foo.Err
+import _ "github.com/rogpeppe/test2/submod"
+
+var _ = submod.X
 
 func main() {
 }
