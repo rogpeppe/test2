@@ -1,8 +1,8 @@
-package main
+package test2
 
-import _ "github.com/rogpeppe/test2/submod"
+import "github.com/rogpeppe/test2/submod"
 
 var _ = submod.X
 
-func main() {
+func Foo() {
 }
