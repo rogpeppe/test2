@@ -18,10 +18,11 @@ import (
 	"gopkg.in/mgo.v2/bson"
 )
 
-func NewStore(db *mgo.Database) *Store {
+func NewStore(db *mgo.Database, countersCollection string) *Store {
 	return &Store{
 		DB: StoreDatabase{
-			Database: db,
+			Database:           db,
+			countersCollection: countersCollection,
 		},
 	}
 }
@@ -44,6 +45,7 @@ type stats struct {
 // StoreDatabase wraps an mgo.DB ands adds a few convenience methods.
 type StoreDatabase struct {
 	*mgo.Database
+	countersCollection string
 }
 
 // Note that changing the StatsGranularity constant
@@ -61,7 +63,7 @@ const StatsGranularity = time.Minute
 //     juju.stat.tokens   - Tokens used in statistics counter keys
 
 func (s StoreDatabase) StatCounters() *mgo.Collection {
-	return s.C("juju.stat.counters")
+	return s.C(s.countersCollection)
 }
 
 func (s StoreDatabase) StatTokens() *mgo.Collection {
@@ -249,6 +251,8 @@ type Counter struct {
 
 // Counters aggregates and returns counter values according to the provided request.
 func (s *Store) Counters(req *CounterRequest) ([]Counter, error) {
+	mark("counters %#v {", req)
+	defer mark("}")
 	tokensColl := s.DB.StatTokens()
 	countersColl := s.DB.StatCounters()
 
