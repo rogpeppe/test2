@@ -7,3 +7,4 @@ var _ = submod.X
 func Foo() {
 }
 
+
