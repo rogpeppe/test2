@@ -1,0 +1,5 @@
+package: github.com/rogpeppe/test2
+import:
+  - package: github.com/Shopify/sarama
+    version: <v1.20.0
+
