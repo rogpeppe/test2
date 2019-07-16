@@ -1,4 +1,4 @@
 package: github.com/rogpeppe/test2
 import:
-  - package: gopkg.in/macaroon.v2
-    version: <v2.1.0
+  - package: github.com/rogpeppe/test
+    version: <v1.1.0
