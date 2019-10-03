@@ -26,6 +26,16 @@
 	pointer receivers) and couple them to flag parsing by
 		flag.Var(&flagVal, "n", "help message for flagname")
 	For such flags, the default value is just the initial value of the variable.
+
+	You can add an alias (another name) for a flag by adding the flag
+	with the same address. Given the above flagVal definition, you can
+	create another name for the same flag.
+		flag.Var(&flagVal, "name", "")
+ 	The usage message for the shortest name is the one printed in the help message.
+
+	After all flags are defined, call
+		flag.Parse()
+	to parse the command line into the defined flags.
 */
 package gnuflag
 
