@@ -45,26 +45,6 @@
 	After parsing, the arguments following the flags are available as the
 	slice flag.Args() or individually as flag.Arg(i).
 	The arguments are indexed from 0 through flag.NArg()-1.
-
-	Command line flag syntax
-
-	The following forms are permitted:
-
-		-f		// single letter flag
-		-f=false	// explicit boolean argument
-		-fg		// two single letter flags together
-		--flag	// multiple letter flag
-		--flag x  // non-boolean flags only
-		--flag=x
-		-f x		// non-boolean flags only
-		-fx		// if f is a non-boolean flag, x is its argument.
-
-	The last three forms are not permitted for boolean flags because the
-	meaning of the command
-		cmd -f *
-	where * is a Unix shell wildcard, will change if there is a file
-	called 0, false, etc. You must use the --flag=false form to turn
-	off a boolean flag.
 */
 package gnuflag
 
