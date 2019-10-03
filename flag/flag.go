@@ -3,13 +3,18 @@
 // license that can be found in the LICENSE file.
 
 /*
-	Package flag implements command-line flag parsing.
+	Package flag implements command-line flag parsing in the GNU style,
+	with multiple-letter flag names requiring a double-hyphen prefix.
+
+	The API is fully compatible with the standard library's flag package,
+	with the addition of the NoIntersperse method and function to control
+	the handling of flags interspersed with arguments,
 
 	Usage
 
 	Define flags using flag.String(), Bool(), Int(), etc.
 
-	This declares an integer flag, -flagname, stored in the pointer ip, with type *int.
+	This declares an integer flag, --flagname, stored in the pointer ip, with type *int.
 		import "flag"
 		var ip = flag.Int("flagname", 1234, "help message for flagname")
 	If you like, you can bind the flag to a variable using the Var() functions.
@@ -19,8 +24,14 @@
 		}
 	Or you can create custom flags that satisfy the Value interface (with
 	pointer receivers) and couple them to flag parsing by
-		flag.Var(&flagVal, "name", "help message for flagname")
+		flag.Var(&flagVal, "n", "help message for flagname")
 	For such flags, the default value is just the initial value of the variable.
+
+	You can add an alias (another name) for a flag by adding the flag
+	with the same address. Given the above flagVal definition, you can
+	create another name for the same flag.
+		flag.Var(&flagVal, "name", "")
+ 	The usage message for the shortest name is the one printed in the help message.
 
 	After all flags are defined, call
 		flag.Parse()
@@ -39,19 +50,25 @@
 
 	The following forms are permitted:
 
-		-flag
-		-flag=x
-		-flag x  // non-boolean flags only
-	One or two minus signs may be used; they are equivalent.
-	The last form is not permitted for boolean flags because the
+		-f		// single letter flag
+		-f=false	// explicit boolean argument
+		-fg		// two single letter flags together
+		--flag	// multiple letter flag
+		--flag x  // non-boolean flags only
+		--flag=x
+		-f x		// non-boolean flags only
+		-fx		// if f is a non-boolean flag, x is its argument.
+
+	The last three forms are not permitted for boolean flags because the
 	meaning of the command
-		cmd -x *
+		cmd -f *
 	where * is a Unix shell wildcard, will change if there is a file
-	called 0, false, etc. You must use the -flag=false form to turn
+	called 0, false, etc. You must use the --flag=false form to turn
 	off a boolean flag.
 
-	Flag parsing stops just before the first non-flag argument
-	("-" is a non-flag argument) or after the terminator "--".
+	Flag parsing stops after the terminator "--", or just before the first
+	non-flag argument ("-" is a non-flag argument) if the interspersed
+	argument to Parse is false.
 
 	Integer flags accept 1234, 0664, 0x1234 and may be negative.
 	Boolean flags may be:
@@ -65,7 +82,7 @@
 	analogous to the top-level functions for the command-line
 	flag set.
 */
-package flag
+package gnuflag
 
 import (
 	"errors"
@@ -77,11 +94,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // ErrHelp is the error returned if the -help or -h flag is invoked
 // but no such flag is defined.
-var ErrHelp = errors.New("flag: help requested")
+var ErrHelp = errors.New("help requested")
 
 // errParse is returned by Set if a flag's value fails to parse, such as with an invalid integer for Int.
 // It then gets wrapped through failf to provide more information.
@@ -196,7 +214,7 @@ func (i *uintValue) Set(s string) error {
 
 func (i *uintValue) Get() interface{} { return uint(*i) }
 
-func (i *uintValue) String() string { return strconv.FormatUint(uint64(*i), 10) }
+func (i *uintValue) String() string { return fmt.Sprintf("%v", *i) }
 
 // -- uint64 Value
 type uint64Value uint64
@@ -234,7 +252,7 @@ func (s *stringValue) Set(val string) error {
 
 func (s *stringValue) Get() interface{} { return string(*s) }
 
-func (s *stringValue) String() string { return string(*s) }
+func (s *stringValue) String() string { return fmt.Sprintf("%s", *s) }
 
 // -- float64 Value
 type float64Value float64
@@ -327,6 +345,10 @@ type FlagSet struct {
 	actual        map[string]*Flag
 	formal        map[string]*Flag
 	args          []string // arguments after flags
+	procArgs      []string // arguments being processed (gnu only)
+	procFlag      string   // flag being processed (gnu only)
+	noIntersperse bool     // whether to forbid flags interspersed with arguments
+	exitOnError   bool     // does the program exit if there's an error?
 	errorHandling ErrorHandling
 	output        io.Writer // nil means stderr; use out() accessor
 }
@@ -351,6 +373,13 @@ func sortFlags(flags map[string]*Flag) []*Flag {
 		return result[i].Name < result[j].Name
 	})
 	return result
+}
+
+func (f *FlagSet) out() io.Writer {
+	if f.output == nil {
+		return os.Stderr
+	}
+	return f.output
 }
 
 // Output returns the destination for usage and error messages. os.Stderr is returned if
@@ -439,6 +468,39 @@ func Set(name, value string) error {
 	return CommandLine.Set(name, value)
 }
 
+// flagsByLength is a slice of flags implementing sort.Interface,
+// sorting primarily by the length of the flag, and secondarily
+// alphabetically.
+type flagsByLength []*Flag
+
+func (f flagsByLength) Less(i, j int) bool {
+	s1, s2 := f[i].Name, f[j].Name
+	if len(s1) != len(s2) {
+		return len(s1) < len(s2)
+	}
+	return s1 < s2
+}
+func (f flagsByLength) Swap(i, j int) {
+	f[i], f[j] = f[j], f[i]
+}
+func (f flagsByLength) Len() int {
+	return len(f)
+}
+
+// flagsByName is a slice of slices of flags implementing sort.Interface,
+// alphabetically sorting by the name of the first flag in each slice.
+type flagsByName [][]*Flag
+
+func (f flagsByName) Less(i, j int) bool {
+	return f[i][0].Name < f[j][0].Name
+}
+func (f flagsByName) Swap(i, j int) {
+	f[i], f[j] = f[j], f[i]
+}
+func (f flagsByName) Len() int {
+	return len(f)
+}
+
 // isZeroValue determines whether the string represents the zero
 // value for a flag.
 func isZeroValue(flag *Flag, value string) bool {
@@ -498,15 +560,36 @@ func UnquoteUsage(flag *Flag) (name string, usage string) {
 // default values of all defined command-line flags in the set. See the
 // documentation for the global function PrintDefaults for more information.
 func (f *FlagSet) PrintDefaults() {
-	f.VisitAll(func(flag *Flag) {
-		s := fmt.Sprintf("  -%s", flag.Name) // Two spaces before -; see next two comments.
-		name, usage := UnquoteUsage(flag)
-		if len(name) > 0 {
-			s += " " + name
+	// group together all flags for a given value
+	flags := make(map[interface{}][]*Flag)
+	f.VisitAll(func(f *Flag) {
+		flags[f.Value] = append(flags[f.Value], f)
+	})
+
+	// sort the output flags by shortest name for each group.
+	var byName flagsByName
+	for _, f := range flags {
+		sort.Sort(flagsByLength(f))
+		byName = append(byName, f)
+	}
+	sort.Sort(byName)
+
+	for _, flags := range byName {
+		name, usage := UnquoteUsage(flags[0])
+		s := "  " // Two spaces before -; see next two comments.
+		for i, flag := range flags {
+			if i > 0 {
+				s += ", "
+			}
+			s += fmt.Sprintf("%s", flagWithMinus(flag.Name))
+			if len(name) > 0 {
+				s += " " + name
+			}
 		}
+		flag := flags[0]
 		// Boolean flags of one ASCII letter are so common we
 		// treat them specially, putting their usage on the same line.
-		if len(s) <= 4 { // space, space, '-', 'x'.
+		if name == "" && len(flags) == 1 && len(flag.Name) == 1 {
 			s += "\t"
 		} else {
 			// Four spaces before the tab triggers good alignment
@@ -524,12 +607,17 @@ func (f *FlagSet) PrintDefaults() {
 			}
 		}
 		fmt.Fprint(f.Output(), s, "\n")
-	})
+	}
 }
 
 // PrintDefaults prints, to standard error unless configured otherwise,
 // a usage message showing the default settings of all defined
 // command-line flags.
+//
+// If there is more than one name for a given flag, the usage information and
+// default value from the shortest will be printed (or the least alphabetically
+// if there are several equally short flag names).
+//
 // For an integer valued flag x, the default output has the form
 //	-x int
 //		usage-message-for-x (default 7)
@@ -799,21 +887,18 @@ func Float64(name string, value float64, usage string) *float64 {
 
 // DurationVar defines a time.Duration flag with specified name, default value, and usage string.
 // The argument p points to a time.Duration variable in which to store the value of the flag.
-// The flag accepts a value acceptable to time.ParseDuration.
 func (f *FlagSet) DurationVar(p *time.Duration, name string, value time.Duration, usage string) {
 	f.Var(newDurationValue(value, p), name, usage)
 }
 
 // DurationVar defines a time.Duration flag with specified name, default value, and usage string.
 // The argument p points to a time.Duration variable in which to store the value of the flag.
-// The flag accepts a value acceptable to time.ParseDuration.
 func DurationVar(p *time.Duration, name string, value time.Duration, usage string) {
 	CommandLine.Var(newDurationValue(value, p), name, usage)
 }
 
 // Duration defines a time.Duration flag with specified name, default value, and usage string.
 // The return value is the address of a time.Duration variable that stores the value of the flag.
-// The flag accepts a value acceptable to time.ParseDuration.
 func (f *FlagSet) Duration(name string, value time.Duration, usage string) *time.Duration {
 	p := new(time.Duration)
 	f.DurationVar(p, name, value, usage)
@@ -822,7 +907,6 @@ func (f *FlagSet) Duration(name string, value time.Duration, usage string) *time
 
 // Duration defines a time.Duration flag with specified name, default value, and usage string.
 // The return value is the address of a time.Duration variable that stores the value of the flag.
-// The flag accepts a value acceptable to time.ParseDuration.
 func Duration(name string, value time.Duration, usage string) *time.Duration {
 	return CommandLine.Duration(name, value, usage)
 }
@@ -872,8 +956,8 @@ func (f *FlagSet) failf(format string, a ...interface{}) error {
 	return err
 }
 
-// usage calls the Usage method for the flag set if one is specified,
-// or the appropriate default usage function otherwise.
+// usage calls the Usage method for the flag set, or the usage function if
+// the flag set is CommandLine.
 func (f *FlagSet) usage() {
 	if f.Usage == nil {
 		f.defaultUsage()
@@ -882,79 +966,145 @@ func (f *FlagSet) usage() {
 	}
 }
 
-// parseOne parses one flag. It reports whether a flag was seen.
-func (f *FlagSet) parseOne() (bool, error) {
-	if len(f.args) == 0 {
-		return false, nil
-	}
-	s := f.args[0]
-	if len(s) < 2 || s[0] != '-' {
-		return false, nil
-	}
-	numMinuses := 1
-	if s[1] == '-' {
-		numMinuses++
-		if len(s) == 2 { // "--" terminates the flags
-			f.args = f.args[1:]
-			return false, nil
-		}
-	}
-	name := s[numMinuses:]
-	if len(name) == 0 || name[0] == '-' || name[0] == '=' {
-		return false, f.failf("bad flag syntax: %s", s)
+func (f *FlagSet) parseOne() (flagName string, long, finished bool, err error) {
+	if len(f.procArgs) == 0 {
+		finished = true
+		return
 	}
 
-	// it's a flag. does it have an argument?
-	f.args = f.args[1:]
-	hasValue := false
-	value := ""
-	for i := 1; i < len(name); i++ { // equals cannot be first
-		if name[i] == '=' {
-			value = name[i+1:]
-			hasValue = true
-			name = name[0:i]
-			break
-		}
+	// processing previously encountered single-rune flag
+	if flag := f.procFlag; len(flag) > 0 {
+		_, n := utf8.DecodeRuneInString(flag)
+		f.procFlag = flag[n:]
+		flagName = flag[0:n]
+		return
 	}
+
+	a := f.procArgs[0]
+
+	// one non-flag argument
+	if a == "-" || a == "" || a[0] != '-' {
+		if !f.noIntersperse {
+			f.args = append(f.args, a)
+			f.procArgs = f.procArgs[1:]
+			return
+		}
+		f.args = append(f.args, f.procArgs...)
+		f.procArgs = nil
+		finished = true
+		return
+	}
+
+	// end of flags
+	if f.procArgs[0] == "--" {
+		f.args = append(f.args, f.procArgs[1:]...)
+		f.procArgs = nil
+		finished = true
+		return
+	}
+
+	// long flag signified with "--" prefix
+	if a[1] == '-' {
+		long = true
+		i := strings.Index(a, "=")
+		if i < 0 {
+			f.procArgs = f.procArgs[1:]
+			flagName = a[2:]
+			return
+		}
+		flagName = a[2:i]
+		if flagName == "" {
+			err = fmt.Errorf("empty flag in argument %q", a)
+			return
+		}
+		f.procArgs = f.procArgs[1:]
+		f.procFlag = a[i:]
+		return
+	}
+
+	// some number of single-rune flags
+	a = a[1:]
+	_, n := utf8.DecodeRuneInString(a)
+	flagName = a[0:n]
+	f.procFlag = a[n:]
+	f.procArgs = f.procArgs[1:]
+	return
+}
+
+func flagWithMinus(name string) string {
+	if len(name) > 1 {
+		return "--" + name
+	}
+	return "-" + name
+}
+
+func (f *FlagSet) parseFlagArg(name string, long bool) (finished bool, err error) {
 	m := f.formal
 	flag, alreadythere := m[name] // BUG
 	if !alreadythere {
 		if name == "help" || name == "h" { // special case for nice help message.
 			f.usage()
+			ErrHelp = errors.New(fmt.Sprintf("flag: %v", ErrHelp.Error()))
 			return false, ErrHelp
 		}
-		return false, f.failf("flag provided but not defined: -%s", name)
+		// TODO print --xxx when flag is more than one rune.
+		return false, f.failf("flag provided but not defined: %s", flagWithMinus(name))
 	}
-
-	if fv, ok := flag.Value.(boolFlag); ok && fv.IsBoolFlag() { // special case: doesn't need an arg
-		if hasValue {
-			if err := fv.Set(value); err != nil {
-				return false, f.failf("invalid boolean value %q for -%s: %v", value, name, err)
-			}
-		} else {
-			if err := fv.Set("true"); err != nil {
-				return false, f.failf("invalid boolean flag %s: %v", name, err)
-			}
+	if fv, ok := flag.Value.(boolFlag); ok && fv.IsBoolFlag() && !strings.HasPrefix(f.procFlag, "=") {
+		// special case: doesn't need an arg, and an arg hasn't
+		// been provided explicitly.
+		if err := fv.Set("true"); err != nil {
+			return false, f.failf("invalid boolean flag %s: %v", name, err)
 		}
 	} else {
 		// It must have a value, which might be the next argument.
-		if !hasValue && len(f.args) > 0 {
+		var hasValue bool
+		var value string
+		if f.procFlag != "" {
+			// value directly follows flag
+			value = f.procFlag
+			if long {
+				if value[0] != '=' {
+					panic("no leading '=' in long flag")
+				}
+				value = value[1:]
+			}
+			hasValue = true
+			f.procFlag = ""
+		}
+		if !hasValue && len(f.procArgs) > 0 {
 			// value is the next arg
 			hasValue = true
-			value, f.args = f.args[0], f.args[1:]
+			value, f.procArgs = f.procArgs[0], f.procArgs[1:]
 		}
 		if !hasValue {
-			return false, f.failf("flag needs an argument: -%s", name)
+			return false, f.failf("flag needs an argument: %s", flagWithMinus(name))
 		}
 		if err := flag.Value.Set(value); err != nil {
-			return false, f.failf("invalid value %q for flag -%s: %v", value, name, err)
+			return false, f.failf("invalid value %q for flag %s: %v", value, flagWithMinus(name), err)
 		}
 	}
 	if f.actual == nil {
 		f.actual = make(map[string]*Flag)
 	}
 	f.actual[name] = flag
-	return true, nil
+	return
+}
+
+// NoIntersperse configures f so that when arguments are parsed, the
+// first non-flag argument will stop flag parsing.
+//
+// By default, flags will be recognized anywhere in the argument list.
+func (f *FlagSet) NoIntersperse() {
+	f.noIntersperse = true
+}
+
+// NoIntersperse configures the global flagset so that when arguments are parsed, the
+// first non-flag argument will stop flag parsing.
+//
+// By default, flags will be recognized anywhere in the argument list.
+func NoIntersperse() {
+	CommandLine.NoIntersperse()
 }
 
 // Parse parses flag definitions from the argument list, which should not
@@ -963,22 +1113,31 @@ func (f *FlagSet) parseOne() (bool, error) {
 // The return value will be ErrHelp if -help or -h were set but not defined.
 func (f *FlagSet) Parse(arguments []string) error {
 	f.parsed = true
-	f.args = arguments
+	f.procArgs = arguments
+	f.procFlag = ""
+	f.args = nil
 	for {
-		seen, err := f.parseOne()
-		if seen {
+		name, long, finished, err := f.parseOne()
+		if !finished {
+			if name != "" {
+				finished, err = f.parseFlagArg(name, long)
+			}
+		}
+		if err != nil {
+			switch f.errorHandling {
+			case ContinueOnError:
+				return err
+			case ExitOnError:
+				os.Exit(2)
+			case PanicOnError:
+				panic(err)
+			}
+		}
+		if !finished {
 			continue
 		}
 		if err == nil {
 			break
-		}
-		switch f.errorHandling {
-		case ContinueOnError:
-			return err
-		case ExitOnError:
-			os.Exit(2)
-		case PanicOnError:
-			panic(err)
 		}
 	}
 	return nil
@@ -991,12 +1150,14 @@ func (f *FlagSet) Parsed() bool {
 
 // Parse parses the command-line flags from os.Args[1:]. Must be called
 // after all flags are defined and before flags are accessed by the program.
+// Note that by default, flags are recognized anywhere in the argument list.
+// This can be altered by calling NoIntersperse.
 func Parse() {
 	// Ignore errors; CommandLine is set for ExitOnError.
 	CommandLine.Parse(os.Args[1:])
 }
 
-// Parsed reports whether the command-line flags have been parsed.
+// Parsed returns true if the command-line flags have been parsed.
 func Parsed() bool {
 	return CommandLine.Parsed()
 }
